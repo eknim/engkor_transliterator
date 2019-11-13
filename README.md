@@ -10,7 +10,7 @@ This project is for building a transliterator, transferring a word from the alph
 
 다음은 해당 프로젝트에 활용한 Seq2seq with attention 모델을 표현한 그림입니다. (학습이 완료된 모델임을 가정) "attention"이 입력되면 "어텐션"이 출력됨을 나타내고 있습니다. Encoder와 Decoder는 Bi-LSTM(Bi-Long Short-Term Memory)으로, attention은 기본적인 NN(Neural Network) 모듈과 Softmax함수로 구성됩니다. NN가 있다는 말은 학습이 가능한 가중치가 있다는 말과 같습니다. 즉, 각각의 입력의 세기를 조절하여 그들의 중요도를 표현할 수 있습니다. 예를 들어, 'a'와 't'의 신호를 증폭시켜 'ㅓ'를 출력할 수 있도록 유도합니다.
 
-![](/assets/diagram.png)
+![](/assets/diagram.PNG)
 
 영문과 같이 한글의 vocabulary 구성도 음소단위(ex.자음,모음)로 구성했습니다. 이를 통해 vocab 사이즈와 학습해야 되는 패턴을 최소화할 수 있고, 높은 일반성을 가지기에 학습 시그널이 부족한 단어가 들어와도 잘 대응할 수 있다는 기대를 가질 수 있습니다. 다음 표를 통해 음절단위로 구성된 muik 모델과 음소단위로 구성된 본 프로젝트의 seq2seq_att 모델과의 결과를 비교할 수 있습니다. 두 모델은 똑같은 데이터셋으로 학습하였습니다. 다음 예제는 모두 학습 데이터 존재하지 않는 단어들입니다.
 
