@@ -13,6 +13,10 @@ $ pip install -r requirements.txt
 
 ### ver1. Train model
 
+```
+$ python seq2seq_att.py --train
+```
+
 ```python
 from engkor_transliterator import seq2seq_att
 model = seq2seq_att.Transliterator()
@@ -23,6 +27,10 @@ model.decode_sequence('attention') # input: attention
 ```
 
 ### ver2. Use pre-trained model
+
+```
+$ python seq2seq_att.py --test
+```
 
 ```python
 from engkor_transliterator import seq2seq_att
