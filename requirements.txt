@@ -1,0 +1,4 @@
+hgtk
+numpy
+matplotlib
+tensorflow-gpu==2.1
