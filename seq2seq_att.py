@@ -8,8 +8,7 @@ from builtins import range, input
 
 import os
 import sys
-import time
-from datetime import datetime
+import copy
 import argparse
 
 import hgtk
@@ -18,32 +17,15 @@ import matplotlib.pyplot as plt
 
 import tensorflow as tf
 import tensorflow.keras.backend as K            
-from tensorflow.keras.preprocessing.text import Tokenizer
 from tensorflow.keras.preprocessing.sequence import pad_sequences
 from tensorflow.keras.callbacks import EarlyStopping
-from tensorflow.keras.models import (
-	Model,
-	model_from_json
-)
-from tensorflow.keras.layers import (
-	Input, 
-	LSTM, 
-	GRU, 
-	Dense, 
-	Embedding,
-	Bidirectional, 
-	RepeatVector, 
-	Concatenate, 
-	Activation, 
-	Dot, 
-	Lambda
-)
 
 import warnings
 warnings.filterwarnings('ignore')
 
 from utils import *
 from config import *
+from preprocess import *
 from model import Seq2seqAtt
 
 
@@ -55,195 +37,68 @@ for gpu in gpus:
 
 parser = argparse.ArgumentParser(description="")
 parser.add_argument("--train", action="store_true", help="Train Mode")
-parser.add_argument("--test", action="store_true", help="Train Mode")
+parser.add_argument("--test", action="store_true", help="Test Mode")
+parser.add_argument("--test_simple", action="store_true", help="Simple Test Mode")
 args = parser.parse_args()
 
-YEARMONTHDAY = str(datetime.fromtimestamp(time.time())).split()[0]
-CUR_PATH = os.path.dirname(os.path.abspath( __file__ ))
-#CUR_PATH = os.getcwd()
-BACK_PATH = '/'.join(CUR_PATH.split('/')[:-3]) # back 2 times
-PRETRAINED_MODEL_PATH = CUR_PATH + "/resources/2019-05-14_model.h5"
-
-
-def log(*s): # multiple args
-    if DEBUG_MODE:
-        print(s)
-
-def load_data(path_trans): # dataset only for this projecte (specifc form)
-    log('> Loading')
-    data = []
-    for filename in os.listdir(path_trans):
-        full_path = path_trans + '/' + filename
-        each_file = open(full_path, 'r', encoding='utf-8')
-        for x in each_file:
-            if '#' == list(x)[0]:
-                continue
-            data.append(x.strip())
-    return data
-
-def eng_preprop(in_str):
-    in_str = in_str.lower()
-    in_str = in_str.replace(' ', '_')
-    in_str = in_str.replace('-', '_')
-    return in_str
-
-def preprocessing(data):
-    log('> Preprocessing')
-    def kor_preprop(in_str):
-        in_str = in_str.replace(' ', '')
-        in_str_decompose = hgtk.text.decompose(in_str)
-        in_str_filter = [x for x in list(in_str_decompose) if x != DEFAULT_COMPOSE_CODE]
-        in_str_join = ''.join(in_str_filter)
-        return in_str_join
-    for i, _ in enumerate(data):
-        source_eng = data[i].split('\t')[0]
-        target_kor = data[i].split('\t')[-1]
-        data[i] = eng_preprop(source_eng) + '\t' + kor_preprop(target_kor)
-    return data
-
-def input_formatting(data):
-    log('> Input Formatting')
-    input_texts = [] # sentence in original language
-    target_texts = [] # sentence in target language
-    target_texts_inputs = [] # sentence in target language offset by 1
-    """
-    < korean-go.txt >
-    ... ... ...
-    gahnite     가나이트
-    garnetting  가네팅
-    GANEFO      가네포
-    garnett     가넷
-    ... ... ...
-    """
-    #t = 0
-    #for line in open(os.getcwd() + '/spa.txt'):
-    for line in data:
-        # only keep a limited number of samples
-        #t += 1
-        #if t > NUM_SAMPLES:
-        #    break
-        # input and target are separated by tab
-        if '\t' not in line:
-            continue
-        # split up the input and translation
-        input_text, translation = line.rstrip().split('\t')
-
-        # make the target input and output
-        # recall we'll be using teacher forcing
-        target_text = ' '.join(list(translation)) + ' <eos>'
-        target_text_input = '<sos> ' + ' '.join(list(translation))
-
-        input_texts.append(' '.join(list(input_text)))
-        target_texts.append(target_text)
-        target_texts_inputs.append(target_text_input)
-
-    log(">> Number of Data:", len(input_texts))
-    params['LEN_INPUT_TEXTS'] = len(input_texts)
-    return (input_texts, target_texts_inputs, target_texts)
-
-def tokenizing(input_texts, target_texts_inputs, target_texts):
-    log('> Tokenizing')
-    ## tokenize the inputs
-    #tokenizer_inputs = Tokenizer(num_words=MAX_NUM_WORDS)
-    tokenizer_inputs = Tokenizer(num_words=params['MAX_NUM_WORDS'], filters='') # MAX_NUM_WORDS = None
-    tokenizer_inputs.fit_on_texts(input_texts)
-    input_sequences = tokenizer_inputs.texts_to_sequences(input_texts)
-    # get the word to index mapping for input language
-    word2idx_inputs = tokenizer_inputs.word_index
-    params['LEN_WORD2IDX_INPUTS'] = len(word2idx_inputs)
-    #print('Found %s unique input tokens.' % len(word2idx_inputs))
-    # determine maximum length input sequence
-    params['MAX_LEN_INPUT'] = max(len(s) for s in input_sequences)
-    # save 'tokenizer_inputs' for decoding
-    save_pkl(tokenizer_inputs, CUR_PATH + '/resources/tokenizer_inputs.pkl')
-    log('>> Tokenizer_inputs is saved!')
-
-    ## tokenize the outputs
-    # tokenize the outputs
-    # don't filter out special characters
-    # otherwise <sos> and <eos> won't appear
-    tokenizer_outputs = Tokenizer(num_words=params['MAX_NUM_WORDS'], filters='') # MAX_NUM_WORDS = None
-    tokenizer_outputs.fit_on_texts(target_texts + target_texts_inputs) # inefficient, oh well
-    target_sequences = tokenizer_outputs.texts_to_sequences(target_texts)
-    target_sequences_inputs = tokenizer_outputs.texts_to_sequences(target_texts_inputs)
-    # get the word to index mapping for output language
-    word2idx_outputs = tokenizer_outputs.word_index
-    params['LEN_WORD2IDX_OUTPUTS'] = len(word2idx_outputs)
-    #print('Found %s unique output tokens.' % len(word2idx_outputs))
-    # store number of output words for later
-    # remember to add 1 since indexing starts at 1 (index 0 = unknown)
-    #num_words_output = len(word2idx_outputs) + 1
-    # determine maximum length output sequence
-    params['MAX_LEN_TARGET'] = max(len(s) for s in target_sequences) 
-    # save 'tokenizer_inputs' for decoding
-    save_pkl(tokenizer_outputs, CUR_PATH + '/resources/tokenizer_outputs.pkl')
-    log('>> Tokenizer_outputs is saved!')
-
-    return (input_sequences, target_sequences_inputs, target_sequences, word2idx_inputs, word2idx_outputs)
-
-def padding(input_sequences, target_sequences_inputs, target_sequences):
-    log('> Padding')
-    # pad the sequences
-    encoder_inputs = pad_sequences(input_sequences, maxlen=params['MAX_LEN_INPUT'])
-    log(">> encoder_data.shape:", encoder_inputs.shape)
-    #print("encoder_data[0]:", encoder_inputs[0])
-
-    decoder_inputs = pad_sequences(target_sequences_inputs, maxlen=params['MAX_LEN_TARGET'], padding='post')
-    #print("decoder_data[0]:", decoder_inputs[0])
-    log(">> decoder_data.shape:", decoder_inputs.shape)
-
-    decoder_targets = pad_sequences(target_sequences, maxlen=params['MAX_LEN_TARGET'], padding='post')
-
-    return (encoder_inputs, decoder_inputs, decoder_targets)
-
-
+base_path = os.path.dirname(os.path.abspath( __file__ ))
+rsrc_path = base_path + '/resources'
+#pretrained_model_path = rsrc_path + "/2019-05-14_model.h5"
+#pretrained_model_path = rsrc_path + '/' + SAVE_NAME + "__model.h5"
+pretrained_model_path = rsrc_path + '/20210411__0_95__0_05__16__model.h5'
+data_path = base_path + '/data'
+train_data_path = data_path + '/train.txt'
+test_data_path = data_path + '/test.txt'
 
 
 
 class Transliterator(object):
 
     def __init__(self):
+        self._load_data()
+        self._process_data()
+
+    def _load_data(self):
+        if not os.path.isfile(train_data_path):
+            raw = load_data_listdir(data_path + '/raw')
+            train, test = split_data(raw, ratio=params['TRAIN_RATIO'])
+            save_data(train, train_data_path)
+            save_data(test, test_data_path)
+        else:
+            train = load_data(train_data_path)
+            test = load_data(test_data_path)
+        log(">> total number of data:", len(train) + len(test))
+        log(">> number of train data:", len(train))
+        log(">> number of test data:", len(test))
+        self.train = train
+        self.test = test
+
+    def _process_data(self):
         ## Basic process for model
         # 아래 과정을 통해 입출력 길이를 파악해야 해야만, 네트워크 파라미터 크기를 결정할 수 있음. (필수적)
-        data = load_data(CUR_PATH + '/data') # dataset only for transliteration
-        data = preprocessing(data)
-        input_texts, target_texts_inputs, target_texts = input_formatting(data)
-        input_sequences, target_sequences_inputs, target_sequences, word2idx_inputs, word2idx_outputs = tokenizing(input_texts, target_texts_inputs, target_texts)
+        train = preprocessing(self.train)
+        input_texts, target_texts_inputs, target_texts = input_formatting(train)
+        tkn_info = tokenizing(input_texts, target_texts_inputs, target_texts, rsrc_path)
+        input_sequences = tkn_info[0]
+        target_sequences_inputs = tkn_info[1]
+        target_sequences = tkn_info[2]
+        word2idx_inputs = tkn_info[3]
+        word2idx_outputs = tkn_info[4]
         self.encoder_inputs, self.decoder_inputs, self.decoder_targets = padding(input_sequences, target_sequences_inputs, target_sequences)        
         
         self.seq2seq_att = Seq2seqAtt(params)
         self.seq2seq_att.build_model()
 
         ## Variables
-        self.tokenizer_inputs = load_pkl(CUR_PATH + '/resources/tokenizer_inputs.pkl')
-        self.tokenizer_outputs = load_pkl(CUR_PATH + '/resources/tokenizer_outputs.pkl')
+        self.tokenizer_inputs = load_pkl(rsrc_path + '/' + 'tokenizer_inputs.pkl')
+        self.tokenizer_outputs = load_pkl(rsrc_path + '/' + 'tokenizer_outputs.pkl')
         self.model = None
         self.encoder_model = None
         self.decoder_model = None
 
-    def _softmax_over_time(self, x):
-        # make sure we do softmax over the time axis
-        # expected shape is N x T x D
-        assert(K.ndim(x) > 2)
-        e = K.exp(x - K.max(x, axis=1, keepdims=True)) # axis=1에 주목.
-        s = K.sum(e, axis=1, keepdims=True)
-        return e / s
+    def run_train(self):
 
-    def _stack_and_transpose(self, x): # 다시 원래의 shape로 만들기 위해.
-        # 'outputs' is now a list of length Ty
-        # each element is of shape (batch size, output vocab size)
-        # therefore if we simply stack all the outputs into 1 tensor
-        # it would be of shape T x N x D
-        # we would like it to be of shape N x T x D
-        # x is a list of length T, each element is a batch_size x output_vocab_size tensor
-        x = K.stack(x) # is now T x batch_size x output_vocab_size tensor
-        x = K.permute_dimensions(x, pattern=(1, 0, 2)) # is now batch_size x T x output_vocab_size
-        return x
-
-
-    def train(self):
-
-        print('> Train Model Start...')
+        log('> Train Model Start...')
         self.model = self.seq2seq_att.e2d_model 
 
         decoder_targets_one_hot = np.zeros(
@@ -266,17 +121,16 @@ class Transliterator(object):
                 [self.encoder_inputs, self.decoder_inputs, z, z], decoder_targets_one_hot,
                 batch_size=params['BATCH_SIZE'],
                 epochs=params['EPOCHS'],
-                validation_split=0.15,
+                validation_split=params['VALID_RATIO'],
                 callbacks=[
-                    EarlyStopping(monitor='val_loss', patience=10)
+                    EarlyStopping(monitor='val_loss', patience=params['PATIENCE'])
                 ] # early stopping
             )
 
-
-        self.model.save_weights(CUR_PATH + '/resources/' + YEARMONTHDAY + "_model.h5")
-        log(">> Saved model's weight")        
-        plt.savefig(CUR_PATH + '/resources/' + 'loss_plot.png')
-        plt.savefig(CUR_PATH + '/resources/' +'acc_plot.png')        
+        log(">> Save model's weight") 
+        self.model.save_weights(rsrc_path + '/' + SAVE_NAME + "__model.h5")
+        plt.savefig(rsrc_path + '/' + SAVE_NAME + '__loss_plot.png')
+        plt.savefig(rsrc_path + '/' + SAVE_NAME + '__acc_plot.png')        
 
         #log('> Desgin Model for Prediction')
         #self.encoder_model = self.seq2seq_att.encoder_model 
@@ -285,12 +139,12 @@ class Transliterator(object):
     def use_pretrained_model(self): 
 
         self.model = self.seq2seq_att.e2d_model
-        self.model.load_weights(PRETRAINED_MODEL_PATH)
+        self.model.load_weights(pretrained_model_path)
 
         self.encoder_model = self.seq2seq_att.encoder_model
         self.decoder_model = self.seq2seq_att.decoder_model
 
-    def compose_hangul(self, in_str):
+    def _compose_hangul(self, in_str):
         # https://zetawiki.com/wiki/...
         kor_vowel_list = "ㅏ ㅐ ㅑ ㅒ ㅓ ㅔ ㅕ ㅖ ㅗ ㅘ ㅙ ㅚ ㅛ ㅜ ㅝ ㅞ ㅟ ㅠ ㅡ ㅢ ㅣ".split()
         temp_list = [DEFAULT_COMPOSE_CODE]
@@ -355,20 +209,126 @@ class Transliterator(object):
             # which is just the word just generated
             target_seq[0, 0] = idx
 
-        return (self.compose_hangul(' '.join(output_sentence)), np.average(output_prob_dist))
+        return (self._compose_hangul(' '.join(output_sentence)), np.average(output_prob_dist))
 
 
+def accuracy(model, test):
+    cnt = 0
+    full_hit_cnt = 0
+    sylb_hit_cnt = 0
+    jamo_hit_cnt = 0
+    raw_test = copy.deepcopy(test)
+    raw_test = [x.split('\t') for x in raw_test]
+    test = preprocessing(test)
+    test = [x.split('\t') for x in test]
+    print(test[:5])
+
+    for i, (eng, kor) in enumerate(test):
+        cnt += 1
+        if cnt % 1000 == 0:
+            print('cur cnt: ', cnt)
+        #print(eng, kor)
+
+        pred_kor = ""
+
+        if WORD_SPLIT:
+            for x in eng.split('_'):
+                y, _ = model.decode_sequence(x)
+                pred_kor += y
+        else:
+            pred_kor, _ = model.decode_sequence(eng)
+
+
+        true_kor = raw_test[i][-1]
+        #print(pred_kor)
+        #print(raw_test[i][-1])
+
+        # full
+        if pred_kor == true_kor:
+            full_hit_cnt += 1
+
+        # sylb
+        min_sylb_length = min(len(list(pred_kor)), len(list(true_kor))) # 짧은 길이 선택
+        temp_sylb_cnt = 0
+        for i in range(0, min_sylb_length):
+            if pred_kor[i] == true_kor[i]:
+                temp_sylb_cnt += 1
+        avg_temp_sylb_cnt = temp_sylb_cnt / min_sylb_length
+        sylb_hit_cnt += avg_temp_sylb_cnt
+
+        # jamo
+        pred_kor_jamo_list = list(hgtk.text.decompose(pred_kor))
+        true_kor_jamo_list = list(hgtk.text.decompose(true_kor))
+        min_jamo_length = min(len(list(pred_kor_jamo_list)), len(list(true_kor_jamo_list))) # 짧은 길이 선택
+        temp_jamo_cnt = 0
+        for i in range(0, min_jamo_length):
+            if pred_kor_jamo_list[i] == true_kor_jamo_list[i]:
+                temp_jamo_cnt += 1
+        avg_temp_jamo_cnt = temp_jamo_cnt / min_jamo_length
+        jamo_hit_cnt += avg_temp_jamo_cnt
+
+        #break
+    print('total cnt: ', cnt)
+    print('full hit cnt: ', full_hit_cnt, round((full_hit_cnt / cnt) * 100, 2))
+    print('sylb hit cnt: ', sylb_hit_cnt, round((sylb_hit_cnt / cnt) * 100, 2))
+    print('jamo hit cnt: ', jamo_hit_cnt, round((jamo_hit_cnt / cnt) * 100, 2))
 
 
 
 if __name__ == "__main__":
 
+    model = Transliterator()
+
     if args.train:
-        model = Transliterator()
-        model.train() # train
+        model.run_train() # train
+
+    elif args.test_simple:
+        model.use_pretrained_model() # use pre-trained model
+        test_list = ['attention', 'tokenizer', 'transliterator', 'suddenly', 'mecab', 'adidas', 'nike']
+        for x in test_list:
+            print(model.decode_sequence(x)) # input: attention
 
     elif args.test:
-        model = Transliterator()
-        model.use_pretrained_model() # use pre-trained model
-        a = model.decode_sequence('attention') # input: attention
-        print(a)
+        model.use_pretrained_model()
+        accuracy(model, 
+                 model.test
+        )
+
+
+# train ratio = 1.0
+# dev ratio = 0.15
+
+# total cnt:  5670
+# full hit cnt:  3279 57.83
+# sylb hit cnt:  4550.605770618269 80.26
+# jamo hit cnt:  4970.415985451947 87.66
+
+
+# train ratio = 0.9
+# dev ratio = 0.1
+
+# total cnt:  5670
+# full hit cnt:  3038 53.58
+# sylb hit cnt:  4265.99119491619 75.24
+# jamo hit cnt:  4756.531747772234 83.89
+
+
+# train ratio = 0.95
+# dev ratio = 0.05
+# batch size = 32
+
+# total cnt:  2835
+# full hit cnt:  1510 53.26
+# sylb hit cnt:  2133.804478854481 75.27
+# jamo hit cnt:  2372.392873615778 83.68
+
+
+# train ratio = 0.95
+# dev ratio = 0.05
+# patience = 15
+# batch size = 16
+
+# total cnt:  2835
+# full hit cnt:  1522 53.69
+# sylb hit cnt:  2160.215223665229 76.2
+# jamo hit cnt:  2386.930456557307 84.2
